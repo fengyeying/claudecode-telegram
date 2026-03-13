@@ -64,24 +64,19 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-### 3. Start tmux + Claude
+### 3. Start everything
 
-tmux keeps Claude Code running persistently; bridge injects messages via `send-keys`.
-
-```bash
-tmux new -s claude
-claude --dangerously-skip-permissions
-```
-
-### 4. Run bridge
-
-Bridge polls Telegram for new messages and injects them into Claude Code.
+One command starts Claude Code in tmux and the bridge together.
 
 ```bash
 export CC_4080_TELEGRAM_BOT_TOKEN="your_token"
-python bridge.py
-# No cloudflared or webhook setup needed — bridge polls Telegram directly
+./start.sh
 ```
+
+- **Window 0** (`claude`): Claude Code — you land here on attach
+- **Window 1** (`bridge`): bridge.py output — switch with `Ctrl-B 1`
+
+**Exit strategy:** when Claude exits, the tmux session is destroyed and bridge stops automatically. No orphan processes. To stop manually: `tmux kill-session -t claude`.
 
 ## Bot Commands
 
@@ -105,9 +100,13 @@ python bridge.py
 
 This fork makes the following changes on top of [hanxiao/claudecode-telegram](https://github.com/hanxiao/claudecode-telegram):
 
+### One-command startup (`start.sh`)
+
+Added `start.sh` which creates a tmux session with Claude Code (window 0) and the bridge (window 1) together. When Claude exits, the session is destroyed and bridge stops — no orphan processes. Setup is now a single command: `./start.sh`.
+
 ### Long polling (no cloudflared)
 
-Replaced the HTTP webhook server with Telegram long polling (`getUpdates`). The bridge now polls Telegram directly — no need to run `cloudflared` or register a webhook URL. Setup drops from 6 steps to 4.
+Replaced the HTTP webhook server with Telegram long polling (`getUpdates`). The bridge now polls Telegram directly — no need to run `cloudflared` or register a webhook URL. Setup drops from 6 steps to 3.
 
 ### Forward all Claude responses
 
