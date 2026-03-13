@@ -7,15 +7,13 @@ import subprocess
 import threading
 import time
 import urllib.request
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 TMUX_SESSION = os.environ.get("TMUX_SESSION", "claude")
 CHAT_ID_FILE = os.path.expanduser("~/.claude/telegram_chat_id")
 PENDING_FILE = os.path.expanduser("~/.claude/telegram_pending")
 HISTORY_FILE = os.path.expanduser("~/.claude/history.jsonl")
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-PORT = int(os.environ.get("PORT", "8080"))
+BOT_TOKEN = os.environ.get("CC_4080_TELEGRAM_BOT_TOKEN", "")
 
 BOT_COMMANDS = [
     {"command": "clear", "description": "Clear conversation"},
@@ -53,6 +51,161 @@ def setup_bot_commands():
     result = telegram_api("setMyCommands", {"commands": BOT_COMMANDS})
     if result and result.get("ok"):
         print("Bot commands registered")
+
+
+def telegram_poll(params):
+    if not BOT_TOKEN:
+        return None
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+        data=json.dumps(params).encode(),
+        headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=35) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        print(f"Poll error: {e}")
+        return None
+
+
+def telegram_send(chat_id, text):
+    telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
+
+
+def handle_callback(cb):
+    chat_id = cb.get("message", {}).get("chat", {}).get("id")
+    data = cb.get("data", "")
+    telegram_api("answerCallbackQuery", {"callback_query_id": cb.get("id")})
+
+    if not tmux_exists():
+        telegram_send(chat_id, "tmux session not found")
+        return
+
+    if data.startswith("resume:"):
+        session_id = data.split(":", 1)[1]
+        tmux_send_escape()
+        time.sleep(0.2)
+        tmux_send("/exit")
+        tmux_send_enter()
+        time.sleep(0.5)
+        tmux_send(f"claude --resume {session_id} --dangerously-skip-permissions")
+        tmux_send_enter()
+        telegram_send(chat_id, f"Resuming: {session_id[:8]}...")
+
+    elif data == "continue_recent":
+        tmux_send_escape()
+        time.sleep(0.2)
+        tmux_send("/exit")
+        tmux_send_enter()
+        time.sleep(0.5)
+        tmux_send("claude --continue --dangerously-skip-permissions")
+        tmux_send_enter()
+        telegram_send(chat_id, "Continuing most recent...")
+
+
+def handle_message(update):
+    msg = update.get("message", {})
+    text, chat_id, msg_id = msg.get("text", ""), msg.get("chat", {}).get("id"), msg.get("message_id")
+    if not text or not chat_id:
+        return
+
+    with open(CHAT_ID_FILE, "w") as f:
+        f.write(str(chat_id))
+
+    if text.startswith("/"):
+        cmd = text.split()[0].lower()
+
+        if cmd == "/status":
+            status = "running" if tmux_exists() else "not found"
+            telegram_send(chat_id, f"tmux '{TMUX_SESSION}': {status}")
+            return
+
+        if cmd == "/stop":
+            if tmux_exists():
+                tmux_send_escape()
+            if os.path.exists(PENDING_FILE):
+                os.remove(PENDING_FILE)
+            telegram_send(chat_id, "Interrupted")
+            return
+
+        if cmd == "/clear":
+            if not tmux_exists():
+                telegram_send(chat_id, "tmux not found")
+                return
+            tmux_send_escape()
+            time.sleep(0.2)
+            tmux_send("/clear")
+            tmux_send_enter()
+            telegram_send(chat_id, "Cleared")
+            return
+
+        if cmd == "/continue_":
+            if not tmux_exists():
+                telegram_send(chat_id, "tmux not found")
+                return
+            tmux_send_escape()
+            time.sleep(0.2)
+            tmux_send("/exit")
+            tmux_send_enter()
+            time.sleep(0.5)
+            tmux_send("claude --continue --dangerously-skip-permissions")
+            tmux_send_enter()
+            telegram_send(chat_id, "Continuing...")
+            return
+
+        if cmd == "/loop":
+            if not tmux_exists():
+                telegram_send(chat_id, "tmux not found")
+                return
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2:
+                telegram_send(chat_id, "Usage: /loop <prompt>")
+                return
+            prompt = parts[1].replace('"', '\\"')
+            full = f'{prompt} Output <promise>DONE</promise> when complete.'
+            with open(PENDING_FILE, "w") as f:
+                f.write(str(int(time.time())))
+            threading.Thread(target=send_typing_loop, args=(chat_id,), daemon=True).start()
+            tmux_send(f'/ralph-loop:ralph-loop "{full}" --max-iterations 5 --completion-promise "DONE"')
+            time.sleep(0.3)
+            tmux_send_enter()
+            telegram_send(chat_id, "Ralph Loop started (max 5 iterations)")
+            return
+
+        if cmd == "/resume":
+            sessions = get_recent_sessions()
+            if not sessions:
+                telegram_send(chat_id, "No sessions")
+                return
+            kb = [[{"text": "Continue most recent", "callback_data": "continue_recent"}]]
+            for s in sessions:
+                sid = get_session_id(s.get("project", ""))
+                if sid:
+                    kb.append([{"text": s.get("display", "?")[:40] + "...", "callback_data": f"resume:{sid}"}])
+            telegram_api("sendMessage", {"chat_id": chat_id, "text": "Select session:", "reply_markup": {"inline_keyboard": kb}})
+            return
+
+        if cmd in BLOCKED_COMMANDS:
+            telegram_send(chat_id, f"'{cmd}' not supported (interactive)")
+            return
+
+    # Regular message
+    print(f"[{chat_id}] {text[:50]}...")
+    with open(PENDING_FILE, "w") as f:
+        f.write(str(int(time.time())))
+
+    if msg_id:
+        telegram_api("setMessageReaction", {"chat_id": chat_id, "message_id": msg_id, "reaction": [{"type": "emoji", "emoji": "\u2705"}]})
+
+    if not tmux_exists():
+        telegram_send(chat_id, "tmux not found")
+        os.remove(PENDING_FILE)
+        return
+
+    threading.Thread(target=send_typing_loop, args=(chat_id,), daemon=True).start()
+    tmux_send(text)
+    tmux_send_enter()
 
 
 def send_typing_loop(chat_id):
@@ -109,174 +262,33 @@ def get_session_id(project_path):
     return None
 
 
-class Handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        try:
-            update = json.loads(body)
+def poll_updates():
+    offset = None
+    while True:
+        params = {"timeout": 30, "allowed_updates": ["message", "callback_query"]}
+        if offset is not None:
+            params["offset"] = offset
+        result = telegram_poll(params)
+        if not result or not result.get("ok"):
+            time.sleep(5)
+            continue
+        for update in result.get("result", []):
+            offset = update["update_id"] + 1
             if "callback_query" in update:
-                self.handle_callback(update["callback_query"])
+                handle_callback(update["callback_query"])
             elif "message" in update:
-                self.handle_message(update)
-        except Exception as e:
-            print(f"Error: {e}")
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Claude-Telegram Bridge")
-
-    def handle_callback(self, cb):
-        chat_id = cb.get("message", {}).get("chat", {}).get("id")
-        data = cb.get("data", "")
-        telegram_api("answerCallbackQuery", {"callback_query_id": cb.get("id")})
-
-        if not tmux_exists():
-            self.reply(chat_id, "tmux session not found")
-            return
-
-        if data.startswith("resume:"):
-            session_id = data.split(":", 1)[1]
-            tmux_send_escape()
-            time.sleep(0.2)
-            tmux_send("/exit")
-            tmux_send_enter()
-            time.sleep(0.5)
-            tmux_send(f"claude --resume {session_id} --dangerously-skip-permissions")
-            tmux_send_enter()
-            self.reply(chat_id, f"Resuming: {session_id[:8]}...")
-
-        elif data == "continue_recent":
-            tmux_send_escape()
-            time.sleep(0.2)
-            tmux_send("/exit")
-            tmux_send_enter()
-            time.sleep(0.5)
-            tmux_send("claude --continue --dangerously-skip-permissions")
-            tmux_send_enter()
-            self.reply(chat_id, "Continuing most recent...")
-
-    def handle_message(self, update):
-        msg = update.get("message", {})
-        text, chat_id, msg_id = msg.get("text", ""), msg.get("chat", {}).get("id"), msg.get("message_id")
-        if not text or not chat_id:
-            return
-
-        with open(CHAT_ID_FILE, "w") as f:
-            f.write(str(chat_id))
-
-        if text.startswith("/"):
-            cmd = text.split()[0].lower()
-
-            if cmd == "/status":
-                status = "running" if tmux_exists() else "not found"
-                self.reply(chat_id, f"tmux '{TMUX_SESSION}': {status}")
-                return
-
-            if cmd == "/stop":
-                if tmux_exists():
-                    tmux_send_escape()
-                if os.path.exists(PENDING_FILE):
-                    os.remove(PENDING_FILE)
-                self.reply(chat_id, "Interrupted")
-                return
-
-            if cmd == "/clear":
-                if not tmux_exists():
-                    self.reply(chat_id, "tmux not found")
-                    return
-                tmux_send_escape()
-                time.sleep(0.2)
-                tmux_send("/clear")
-                tmux_send_enter()
-                self.reply(chat_id, "Cleared")
-                return
-
-            if cmd == "/continue_":
-                if not tmux_exists():
-                    self.reply(chat_id, "tmux not found")
-                    return
-                tmux_send_escape()
-                time.sleep(0.2)
-                tmux_send("/exit")
-                tmux_send_enter()
-                time.sleep(0.5)
-                tmux_send("claude --continue --dangerously-skip-permissions")
-                tmux_send_enter()
-                self.reply(chat_id, "Continuing...")
-                return
-
-            if cmd == "/loop":
-                if not tmux_exists():
-                    self.reply(chat_id, "tmux not found")
-                    return
-                parts = text.split(maxsplit=1)
-                if len(parts) < 2:
-                    self.reply(chat_id, "Usage: /loop <prompt>")
-                    return
-                prompt = parts[1].replace('"', '\\"')
-                full = f'{prompt} Output <promise>DONE</promise> when complete.'
-                with open(PENDING_FILE, "w") as f:
-                    f.write(str(int(time.time())))
-                threading.Thread(target=send_typing_loop, args=(chat_id,), daemon=True).start()
-                tmux_send(f'/ralph-loop:ralph-loop "{full}" --max-iterations 5 --completion-promise "DONE"')
-                time.sleep(0.3)
-                tmux_send_enter()
-                self.reply(chat_id, "Ralph Loop started (max 5 iterations)")
-                return
-
-            if cmd == "/resume":
-                sessions = get_recent_sessions()
-                if not sessions:
-                    self.reply(chat_id, "No sessions")
-                    return
-                kb = [[{"text": "Continue most recent", "callback_data": "continue_recent"}]]
-                for s in sessions:
-                    sid = get_session_id(s.get("project", ""))
-                    if sid:
-                        kb.append([{"text": s.get("display", "?")[:40] + "...", "callback_data": f"resume:{sid}"}])
-                telegram_api("sendMessage", {"chat_id": chat_id, "text": "Select session:", "reply_markup": {"inline_keyboard": kb}})
-                return
-
-            if cmd in BLOCKED_COMMANDS:
-                self.reply(chat_id, f"'{cmd}' not supported (interactive)")
-                return
-
-        # Regular message
-        print(f"[{chat_id}] {text[:50]}...")
-        with open(PENDING_FILE, "w") as f:
-            f.write(str(int(time.time())))
-
-        if msg_id:
-            telegram_api("setMessageReaction", {"chat_id": chat_id, "message_id": msg_id, "reaction": [{"type": "emoji", "emoji": "\u2705"}]})
-
-        if not tmux_exists():
-            self.reply(chat_id, "tmux not found")
-            os.remove(PENDING_FILE)
-            return
-
-        threading.Thread(target=send_typing_loop, args=(chat_id,), daemon=True).start()
-        tmux_send(text)
-        tmux_send_enter()
-
-    def reply(self, chat_id, text):
-        telegram_api("sendMessage", {"chat_id": chat_id, "text": text})
-
-    def log_message(self, *args):
-        pass
+                handle_message(update)
 
 
 def main():
     if not BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not set")
         return
+    telegram_api("deleteWebhook", {"drop_pending_updates": True})
     setup_bot_commands()
-    print(f"Bridge on :{PORT} | tmux: {TMUX_SESSION}")
+    print(f"Bridge polling | tmux: {TMUX_SESSION}")
     try:
-        HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+        poll_updates()
     except KeyboardInterrupt:
         print("\nStopped")
 
