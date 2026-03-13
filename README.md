@@ -8,11 +8,10 @@ Telegram bot bridge for Claude Code. Send messages from Telegram, get responses 
 
 ```mermaid
 flowchart LR
-    A[Telegram] --> B[Cloudflare Tunnel]
-    B --> C[Bridge Server]
-    C -->|tmux send-keys| D[Claude Code]
-    D -->|Stop Hook| E[Read Transcript]
-    E -->|Send Response| A
+    A[Telegram] -->|getUpdates| B[Bridge]
+    B -->|tmux send-keys| C[Claude Code]
+    C -->|Stop Hook| D[Read Transcript]
+    D -->|sendMessage| A
 ```
 
 1. Bridge receives Telegram webhooks, injects messages into Claude Code via tmux
@@ -23,7 +22,7 @@ flowchart LR
 
 ```bash
 # Prerequisites
-brew install tmux cloudflared
+brew install tmux
 
 # Clone
 git clone https://github.com/hanxiao/claudecode-telegram
@@ -74,27 +73,12 @@ claude --dangerously-skip-permissions
 
 ### 4. Run bridge
 
-Bridge receives Telegram webhooks and injects messages into Claude Code.
+Bridge polls Telegram for new messages and injects them into Claude Code.
 
 ```bash
-export TELEGRAM_BOT_TOKEN="your_token"
+export CC_4080_TELEGRAM_BOT_TOKEN="your_token"
 python bridge.py
-```
-
-### 5. Expose via Cloudflare Tunnel
-
-Tunnel exposes local bridge to the internet so Telegram can reach it.
-
-```bash
-cloudflared tunnel --url http://localhost:8080
-```
-
-### 6. Set webhook
-
-Tells Telegram where to send message updates.
-
-```bash
-curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=https://YOUR-TUNNEL-URL.trycloudflare.com"
+# No cloudflared or webhook setup needed — bridge polls Telegram directly
 ```
 
 ## Bot Commands
@@ -112,6 +96,5 @@ curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=https://Y
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TELEGRAM_BOT_TOKEN` | required | Bot token from BotFather |
+| `CC_4080_TELEGRAM_BOT_TOKEN` | required | Bot token from BotFather |
 | `TMUX_SESSION` | `claude` | tmux session name |
-| `PORT` | `8080` | Bridge port |
