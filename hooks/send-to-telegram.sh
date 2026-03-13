@@ -3,29 +3,32 @@
 # Install: copy to ~/.claude/hooks/ and add to ~/.claude/settings.json
 
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-YOUR_BOT_TOKEN_HERE}"
+LOG=/tmp/tg-hook-debug.log
 INPUT=$(cat)
+echo "--- $(date) ---" >> "$LOG"
 TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path')
+echo "TRANSCRIPT_PATH: $TRANSCRIPT_PATH" >> "$LOG"
 CHAT_ID_FILE=~/.claude/telegram_chat_id
-PENDING_FILE=~/.claude/telegram_pending
 
-# Only respond to Telegram-initiated messages
-[ ! -f "$PENDING_FILE" ] && exit 0
-
-PENDING_TIME=$(cat "$PENDING_FILE" 2>/dev/null)
-NOW=$(date +%s)
-[ -z "$PENDING_TIME" ] || [ $((NOW - PENDING_TIME)) -gt 600 ] && rm -f "$PENDING_FILE" && exit 0
-[ ! -f "$CHAT_ID_FILE" ] || [ ! -f "$TRANSCRIPT_PATH" ] && rm -f "$PENDING_FILE" && exit 0
+# Forward all responses if we have a known chat_id
+if [ ! -f "$CHAT_ID_FILE" ] || [ ! -f "$TRANSCRIPT_PATH" ]; then
+    echo "EXIT: no chat_id or transcript" >> "$LOG"
+    exit 0
+fi
 
 CHAT_ID=$(cat "$CHAT_ID_FILE")
+echo "CHAT_ID: $CHAT_ID" >> "$LOG"
 LAST_USER_LINE=$(grep -n '"type":"user"' "$TRANSCRIPT_PATH" | tail -1 | cut -d: -f1)
-[ -z "$LAST_USER_LINE" ] && rm -f "$PENDING_FILE" && exit 0
+echo "LAST_USER_LINE: $LAST_USER_LINE" >> "$LOG"
+if [ -z "$LAST_USER_LINE" ]; then echo "EXIT: no user line in transcript" >> "$LOG"; exit 0; fi
 
 TMPFILE=$(mktemp)
 tail -n "+$LAST_USER_LINE" "$TRANSCRIPT_PATH" | \
   grep '"type":"assistant"' | \
   jq -rs '[.[].message.content[] | select(.type == "text") | .text] | join("\n\n")' > "$TMPFILE" 2>/dev/null
-
-[ ! -s "$TMPFILE" ] && rm -f "$TMPFILE" "$PENDING_FILE" && exit 0
+echo "TMPFILE size: $(wc -c < "$TMPFILE")" >> "$LOG"
+if [ ! -s "$TMPFILE" ]; then echo "EXIT: empty tmpfile" >> "$LOG"; rm -f "$TMPFILE"; exit 0; fi
+echo "SENDING to Telegram" >> "$LOG"
 
 python3 - "$TMPFILE" "$CHAT_ID" "$TELEGRAM_BOT_TOKEN" << 'PYEOF'
 import sys, re, json, urllib.request
@@ -70,5 +73,5 @@ if not send(text, "HTML"):
         send(f.read()[:4096])
 PYEOF
 
-rm -f "$TMPFILE" "$PENDING_FILE"
+rm -f "$TMPFILE"
 exit 0

@@ -196,7 +196,7 @@ def handle_message(update):
         f.write(str(int(time.time())))
 
     if msg_id:
-        telegram_api("setMessageReaction", {"chat_id": chat_id, "message_id": msg_id, "reaction": [{"type": "emoji", "emoji": "\u2705"}]})
+        telegram_api("setMessageReaction", {"chat_id": chat_id, "message_id": msg_id, "reaction": [{"type": "emoji", "emoji": "\U0001f44c"}]})
 
     if not tmux_exists():
         telegram_send(chat_id, "tmux not found")

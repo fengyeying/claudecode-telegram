@@ -4,6 +4,8 @@
 
 Telegram bot bridge for Claude Code. Send messages from Telegram, get responses back.
 
+> **Based on** [hanxiao/claudecode-telegram](https://github.com/hanxiao/claudecode-telegram) — thanks to [@hanxiao](https://github.com/hanxiao) for the original project.
+
 ## How it works
 
 ```mermaid
@@ -16,7 +18,7 @@ flowchart LR
 
 1. Bridge receives Telegram webhooks, injects messages into Claude Code via tmux
 2. Claude Code's Stop hook reads the transcript and sends response back to Telegram
-3. Only responds to Telegram-initiated messages (uses pending file as flag)
+3. Forwards **all** Claude responses (not just Telegram-initiated ones)
 
 ## Install
 
@@ -25,7 +27,7 @@ flowchart LR
 brew install tmux
 
 # Clone
-git clone https://github.com/hanxiao/claudecode-telegram
+git clone https://github.com/fengyeying/claudecode-telegram
 cd claudecode-telegram
 
 # Setup Python env
@@ -98,3 +100,27 @@ python bridge.py
 |----------|---------|-------------|
 | `CC_4080_TELEGRAM_BOT_TOKEN` | required | Bot token from BotFather |
 | `TMUX_SESSION` | `claude` | tmux session name |
+
+## Changes from Original
+
+This fork makes the following changes on top of [hanxiao/claudecode-telegram](https://github.com/hanxiao/claudecode-telegram):
+
+### Long polling (no cloudflared)
+
+Replaced the HTTP webhook server with Telegram long polling (`getUpdates`). The bridge now polls Telegram directly — no need to run `cloudflared` or register a webhook URL. Setup drops from 6 steps to 4.
+
+### Forward all Claude responses
+
+The original hook only forwarded responses to Telegram-initiated messages (via a pending-file gate). This fork forwards **all** Claude responses — whether the prompt came from Telegram or the local terminal. As long as a chat ID is known, every Claude reply goes to Telegram.
+
+### Reaction emoji fix
+
+Fixed a `400 Bad Request` error from `setMessageReaction`: replaced `✅` (not in Telegram's allowed reaction set) with `👌`.
+
+### Unit tests
+
+Added `tests/test_bridge.py` with 10 unit tests covering `telegram_poll`, `poll_updates`, `telegram_send`, and `main`.
+
+## Credits
+
+Original project: [hanxiao/claudecode-telegram](https://github.com/hanxiao/claudecode-telegram) by [@hanxiao](https://github.com/hanxiao).
