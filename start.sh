@@ -2,7 +2,7 @@
 # start.sh — launch Claude Code + Telegram bridge in one command
 #
 # Usage:
-#   export CC_4080_TELEGRAM_BOT_TOKEN="your_token"
+#   export TELEGRAM_BOT_TOKEN="your_token"
 #   ./start.sh
 #
 # Exit strategy:
@@ -23,8 +23,8 @@ SESSION="${TMUX_SESSION:-claude}"
 
 # ── Validate token ────────────────────────────────────────────────────────────
 if [ -z "${CC_4080_TELEGRAM_BOT_TOKEN:-}" ]; then
-    echo "Error: CC_4080_TELEGRAM_BOT_TOKEN is not set"
-    echo "  export CC_4080_TELEGRAM_BOT_TOKEN=your_token"
+    echo "Error: TELEGRAM_BOT_TOKEN is not set"
+    echo "  export TELEGRAM_BOT_TOKEN=your_token"
     exit 1
 fi
 
